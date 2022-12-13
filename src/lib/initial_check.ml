@@ -82,13 +82,26 @@ let opt_enum_casts = ref false
 
 type ctx = {
     kinds : kind_aux KBindings.t;
-    type_constructors : (kind_aux list) Bindings.t;
+    type_constructors : (kind_aux list * kind_aux) Bindings.t;
     scattereds : ctx Bindings.t;
     reserved_type_ids : id list;
     internal_files : string list;
     target_sets : (string * string list) list;
+    fixity : (prec * Big_int.num * P.l) Bindings.t;
+    prefix_fixity : Big_int.num Bindings.t;
   }
 
+let deinfix = function
+  | (Id_aux (Id v, l)) -> Id_aux (Operator v, l)
+  | (Id_aux (Operator v, l)) -> Id_aux (Id v, l)
+         
+let merge_range l1 l2 =
+  match Reporting.simp_loc l1, Reporting.simp_loc l2 with
+  | Some (l1, _), Some (_, l2) -> Parse_ast.Range (l1, l2)
+  | Some (l1, _), None -> Parse_ast.Range (l1, l1)
+  | None, Some (_, l2) -> Parse_ast.Range (l2, l2)
+  | None, None -> Parse_ast.Unknown
+         
 let string_of_parse_id_aux = function
   | P.Id v -> v
   | P.Operator v -> v
@@ -101,6 +114,77 @@ let string_contains str char =
   try (ignore (String.index str char); true) with
   | Not_found -> false
 
+
+let get_precedence ctx op =
+  match Bindings.find_opt op ctx.fixity with
+  | Some (_, prec, _) -> prec
+  | None ->
+     match Bindings.find_opt op ctx.prefix_fixity with
+     | Some prec -> prec
+     | None ->
+        raise (Reporting.err_general (id_loc op) ("No defined precedence for operator " ^ string_of_id op))
+    
+let left_associative ctx op =
+  match Bindings.find_opt op ctx.fixity with
+  | Some (InfixL, _, _) -> true
+  | _ -> false
+
+let non_associative ctx op =
+  match Bindings.find_opt op ctx.fixity with
+  | Some (Infix, _, _) -> true
+  | _ -> false
+
+let chains o1 o2 =
+  let valid_chains =
+    [ ("<", "<");
+      ("<", "<=");
+      ("<=", "<");
+      ("<=", "<=");
+      (">", ">");
+      (">", ">=");
+      (">=", ">");
+      (">=", ">=");
+    ] in
+  List.exists (fun (s1, s2) -> Id.compare o1 (mk_id s1) = 0 && Id.compare o2 (mk_id s2) = 0) valid_chains
+               
+module Typ_infix_parser_config : (Infix_parser.Config with type ctx = ctx and type primary = P.atyp and type id = id) = struct
+  type primary = P.atyp
+  type nonrec id = id
+  type l = P.l
+  type nonrec ctx = ctx
+
+  let primary_loc (P.ATyp_aux (_, l)) = l
+
+  let chains = chains
+                                      
+  let id_loc = id_loc
+  let get_precedence = get_precedence
+  let left_associative = left_associative
+  let non_associative = non_associative
+  let error = Reporting.err_general
+end
+
+module Typ_infix_parser = Infix_parser.Make(Typ_infix_parser_config)
+
+module Exp_infix_parser_config : (Infix_parser.Config with type ctx = ctx and type primary = P.exp and type id = id) = struct
+  type primary = P.exp
+  type nonrec id = id
+  type l = P.l
+  type nonrec ctx = ctx
+                 
+  let primary_loc (P.E_aux (_, l)) = l
+
+  let chains _ _ = false
+                                   
+  let id_loc = id_loc
+  let get_precedence = get_precedence
+  let left_associative = left_associative
+  let non_associative = non_associative
+  let error = Reporting.err_general
+end
+
+module Exp_infix_parser = Infix_parser.Make(Exp_infix_parser_config)
+               
 let to_ast_kind (P.K_aux (k, l)) =
   match k with
   | P.K_type  -> K_aux (K_type, l)
@@ -130,6 +214,19 @@ let format_kind_aux_list = function
   | [kind] -> string_of_kind_aux kind
   | kinds -> "(" ^ Util.string_of_list ", " string_of_kind_aux kinds ^ ")"
 
+let get_type_constructor l id num_args ctx =
+  match Bindings.find_opt id ctx.type_constructors with
+  | None -> raise (Reporting.err_typ l (sprintf "Could not find type constructor %s" (string_of_id id)))
+  | Some (kinds, ret_kind) ->
+     if List.compare_length_with kinds num_args <> 0 then
+       raise (Reporting.err_typ l (sprintf "%s : %s -> %s expected %d arguments, given 2"
+                                     (string_of_id id)
+                                     (format_kind_aux_list kinds)
+                                     (string_of_kind_aux ret_kind)
+                                     (List.length kinds)))
+     else
+       (kinds, ret_kind)
+ 
 let to_ast_kopts ctx (P.KOpt_aux (aux, l)) =
   let mk_kopt v k =
     let v = to_ast_var v in
@@ -142,6 +239,11 @@ let to_ast_kopts ctx (P.KOpt_aux (aux, l)) =
      List.fold_left (fun (kopts, ctx) v -> let kopt, ctx = mk_kopt v k in (kopt :: kopts, ctx)) ([], ctx) vs, attr
   | P.KOpt_kind (attr, vs, Some k) ->
      List.fold_left (fun (kopts, ctx) v -> let kopt, ctx = mk_kopt v k in (kopt :: kopts, ctx)) ([], ctx) vs, attr
+
+type partial_constraint =
+  | Constraint of n_constraint
+  | Nexp of nexp
+  | Raw of P.atyp
 
 let rec to_ast_typ ctx (P.ATyp_aux (aux, l)) =
   let aux = match aux with
@@ -164,11 +266,12 @@ let rec to_ast_typ ctx (P.ATyp_aux (aux, l)) =
        let id = to_ast_id ctx id in
        begin match Bindings.find_opt id ctx.type_constructors with
        | None -> raise (Reporting.err_typ l (sprintf "Could not find type constructor %s" (string_of_id id)))
-       | Some kinds when List.length args <> List.length kinds ->
+       (* FIXME *)
+       | Some (kinds, ret_kind) when List.length args <> List.length kinds ->
           raise (Reporting.err_typ l (sprintf "%s : %s -> Type expected %d arguments, given %d"
-                                              (string_of_id id) (format_kind_aux_list kinds)
-                                              (List.length kinds) (List.length args)))
-       | Some kinds ->
+                                        (string_of_id id) (format_kind_aux_list kinds)
+                                        (List.length kinds) (List.length args)))
+       | Some (kinds, ret_kind) ->
           Typ_app (id, List.map2 (to_ast_typ_arg ctx) args kinds)
        end
     | P.ATyp_exist (kopts, nc, atyp) ->
@@ -183,46 +286,79 @@ let rec to_ast_typ ctx (P.ATyp_aux (aux, l)) =
            ) kopts ([], ctx)
        in
        Typ_exist (kopts, to_ast_constraint ctx nc, to_ast_typ ctx atyp)
+    | P.ATyp_infix ityps ->
+       let ityps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) ityps in
+       let rpn = Typ_infix_parser.parse ctx ityps in
+       Reporting.unreachable l __POS__ "infix"
     | P.ATyp_base (id, kind, nc) ->
        raise (Reporting.err_unreachable l __POS__ "TODO")
     | _ -> raise (Reporting.err_typ l "Invalid type")
   in
   Typ_aux (aux, l)
 
-and to_ast_typ_arg ctx (ATyp_aux (_, l) as atyp) = function
+and to_ast_typ_arg ctx (P.ATyp_aux (_, l) as atyp) = function
   | K_type  -> A_aux (A_typ (to_ast_typ ctx atyp), l)
   | K_int   -> A_aux (A_nexp (to_ast_nexp ctx atyp), l)
   | K_order -> A_aux (A_order (to_ast_order ctx atyp), l)
   | K_bool  -> A_aux (A_bool (to_ast_constraint ctx atyp), l)
 
-and to_ast_nexp ctx (P.ATyp_aux (aux, l)) =
-  let aux = match aux with
-    | P.ATyp_id id -> Nexp_id (to_ast_id ctx id)
-    | P.ATyp_var v -> Nexp_var (to_ast_var v)
-    | P.ATyp_lit (P.L_aux (P.L_num c, _)) -> Nexp_constant c
-    | P.ATyp_sum (t1, t2) -> Nexp_sum (to_ast_nexp ctx t1, to_ast_nexp ctx t2)
-    | P.ATyp_exp t1 -> Nexp_exp (to_ast_nexp ctx t1)
-    | P.ATyp_neg t1 -> Nexp_neg (to_ast_nexp ctx t1)
-    | P.ATyp_times (t1, t2) -> Nexp_times (to_ast_nexp ctx t1, to_ast_nexp ctx t2)
-    | P.ATyp_minus (t1, t2) -> Nexp_minus (to_ast_nexp ctx t1, to_ast_nexp ctx t2)
-    | P.ATyp_app (id, ts) -> Nexp_app (to_ast_id ctx id, List.map (to_ast_nexp ctx) ts)
-    | _ -> raise (Reporting.err_typ l "Invalid numeric expression in type")
+and binary_nexp id (Nexp_aux (n1_aux, l1) as n1) (Nexp_aux (_, l2) as n2) =
+  let l = merge_range l1 l2 in
+  let aux =
+    if Id.compare id (mk_id "+") = 0 then
+      Nexp_sum (n1, n2)
+    else if Id.compare id (mk_id "-") = 0 then
+      Nexp_minus (n1, n2)
+    else if Id.compare id (mk_id "*") = 0 then
+      Nexp_times (n1, n2)
+    else if Id.compare id (mk_id "^") = 0 then
+      begin match n1_aux with
+      | Nexp_constant c when Big_int.equal c (Big_int.of_int 2) ->
+         Nexp_exp n2
+      | _ ->
+         raise (Reporting.err_typ l "Type level exponential must have the form 2 ^ 'n")
+      end
+    else
+      Nexp_app (deinfix id, [n1; n2])
   in
   Nexp_aux (aux, l)
 
-and to_ast_bitfield_index_nexp ctx (P.ATyp_aux (aux, l)) =
-  let aux = match aux with
-    | P.ATyp_id id -> Nexp_id (to_ast_id ctx id)
-    | P.ATyp_lit (P.L_aux (P.L_num c, _)) -> Nexp_constant c
-    | P.ATyp_sum (t1, t2) -> Nexp_sum (to_ast_bitfield_index_nexp ctx t1, to_ast_bitfield_index_nexp ctx t2)
-    | P.ATyp_exp t1 -> Nexp_exp (to_ast_bitfield_index_nexp ctx t1)
-    | P.ATyp_neg t1 -> Nexp_neg (to_ast_bitfield_index_nexp ctx t1)
-    | P.ATyp_times (t1, t2) -> Nexp_times (to_ast_bitfield_index_nexp ctx t1, to_ast_bitfield_index_nexp ctx t2)
-    | P.ATyp_minus (t1, t2) -> Nexp_minus (to_ast_bitfield_index_nexp ctx t1, to_ast_bitfield_index_nexp ctx t2)
-    | P.ATyp_app (id, ts) -> Nexp_app (to_ast_id ctx id, List.map (to_ast_bitfield_index_nexp ctx) ts)
-    | _ -> raise (Reporting.err_typ l "Invalid numeric expression in field index")
+and prefix_nexp id (Nexp_aux (_, l) as n) =
+  let l = merge_range (id_loc id) l in
+  let aux =
+    if Id.compare id (mk_id "negate") = 0 then
+      Nexp_neg n
+    else
+      raise (Reporting.err_typ l "Invalid numeric expression in type")
   in
   Nexp_aux (aux, l)
+      
+and to_ast_nexp ctx (P.ATyp_aux (aux, l)) =
+  match aux with
+  | P.ATyp_id id -> Nexp_aux (Nexp_id (to_ast_id ctx id), l)
+  | P.ATyp_var v -> Nexp_aux (Nexp_var (to_ast_var v), l)
+  | P.ATyp_lit (P.L_aux (P.L_num c, _)) -> Nexp_aux (Nexp_constant c, l)
+  | P.ATyp_exp t1 -> Nexp_aux (Nexp_exp (to_ast_nexp ctx t1), l)
+  | P.ATyp_neg t1 -> Nexp_aux (Nexp_neg (to_ast_nexp ctx t1), l)
+  | P.ATyp_app (id, ts) -> Nexp_aux (Nexp_app (to_ast_id ctx id, List.map (to_ast_nexp ctx) ts), l)
+  | P.ATyp_infix ityps ->
+     let ityps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) ityps in
+     let rpn = Typ_infix_parser.parse ctx ityps in
+     Typ_infix_parser.tree ~f:(to_ast_nexp ctx) ~prefix:prefix_nexp ~operator:binary_nexp ~chain:(fun _ xs -> List.hd xs) rpn 
+  | _ -> raise (Reporting.err_typ l "Invalid numeric expression in type")
+
+and to_ast_bitfield_index_nexp ctx (P.ATyp_aux (aux, l)) =
+  match aux with
+  | P.ATyp_id id -> Nexp_aux (Nexp_id (to_ast_id ctx id), l)
+  | P.ATyp_lit (P.L_aux (P.L_num c, _)) -> Nexp_aux (Nexp_constant c, l)
+  | P.ATyp_exp t1 -> Nexp_aux (Nexp_exp (to_ast_bitfield_index_nexp ctx t1), l)
+  | P.ATyp_neg t1 -> Nexp_aux (Nexp_neg (to_ast_bitfield_index_nexp ctx t1), l)
+  | P.ATyp_app (id, ts) -> Nexp_aux (Nexp_app (to_ast_id ctx id, List.map (to_ast_bitfield_index_nexp ctx) ts), l)
+  | P.ATyp_infix ityps ->
+     let ityps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) ityps in
+     let rpn = Typ_infix_parser.parse ctx ityps in
+     Typ_infix_parser.tree ~f:(to_ast_bitfield_index_nexp ctx) ~prefix:prefix_nexp ~operator:binary_nexp ~chain:(fun _ xs -> List.hd xs) rpn 
+  | _ -> raise (Reporting.err_typ l "Invalid numeric expression in field index")
 
 and to_ast_order ctx (P.ATyp_aux (aux, l)) =
   match aux with
@@ -230,7 +366,83 @@ and to_ast_order ctx (P.ATyp_aux (aux, l)) =
   | ATyp_inc -> Ord_aux (Ord_inc, l)
   | ATyp_dec -> Ord_aux (Ord_dec, l)
   | _ -> raise (Reporting.err_typ l "Invalid order in type")
+         
+and pc_to_nexp ctx = function
+  | Raw (ATyp_aux (_, l) as atyp) -> to_ast_nexp ctx atyp
+  | Nexp nexp -> nexp
+  | Constraint (NC_aux (_, l)) ->
+     raise (Reporting.err_typ l "Expected numeric expression, found boolean constraint")
 
+and pc_to_constraint ctx = function
+  | Raw (ATyp_aux (_, l) as atyp) -> to_ast_constraint ctx atyp
+  | Constraint nc -> nc
+  | Nexp (Nexp_aux (_, l) as nexp) ->
+     raise (Reporting.err_typ l "Expected boolean constraint, found numeric expression")
+
+and pc_to_typ_arg ctx kind = function
+  | Raw atyp -> to_ast_typ_arg ctx atyp kind
+  | Nexp (Nexp_aux (_, l) as n) -> A_aux (A_nexp n, l)
+  | Constraint (NC_aux (_, l) as nc) -> A_aux (A_bool nc, l)
+    
+and pc_get_loc = function
+  | Raw (ATyp_aux (_, l)) -> l
+  | Constraint (NC_aux (_, l)) -> l
+  | Nexp (Nexp_aux (_, l)) -> l
+
+and binary_constraint ctx id c1 c2 =
+  let l = merge_range (pc_get_loc c1) (pc_get_loc c2) in
+  match string_of_id id with
+  | "==" -> Constraint (NC_aux (NC_equal (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | "!=" -> Constraint (NC_aux (NC_not_equal (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | ">=" -> Constraint (NC_aux (NC_bounded_ge (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | "<=" -> Constraint (NC_aux (NC_bounded_le (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | ">" -> Constraint (NC_aux (NC_bounded_gt (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | "<" -> Constraint (NC_aux (NC_bounded_lt (pc_to_nexp ctx c1, pc_to_nexp ctx c2), l))
+  | "&" -> Constraint (NC_aux (NC_and (pc_to_constraint ctx c1, pc_to_constraint ctx c2), l))
+  | "|" -> Constraint (NC_aux (NC_or (pc_to_constraint ctx c1, pc_to_constraint ctx c2), l))
+  | ("+" | "-" | "*" | "^") -> Nexp (binary_nexp id (pc_to_nexp ctx c1) (pc_to_nexp ctx c2))
+  | _ ->
+     let kinds, ret_kind = get_type_constructor l (deinfix id) 2 ctx in
+     match kinds, ret_kind with
+     | [k1; k2], K_bool ->
+        let a1 = pc_to_typ_arg ctx k1 c1 in
+        let a2 = pc_to_typ_arg ctx k2 c2 in
+        Constraint (NC_aux (NC_app (deinfix id, [a1; a2]), l))
+     | [_; _], K_int ->
+        let n1 = pc_to_nexp ctx c1 in
+        let n2 = pc_to_nexp ctx c2 in
+        Nexp (Nexp_aux (Nexp_app (deinfix id, [n1; n2]), l))
+     | _ ->
+        assert false
+ 
+and chain_constraint ctx ops cs =
+  let rec go ops cs = match ops, cs with
+    | (op :: ops), (x :: y :: zs) ->
+       let l = merge_range (pc_get_loc x) (pc_get_loc y) in
+       let nc = match string_of_id op with
+         | ">=" -> NC_bounded_ge (pc_to_nexp ctx x, pc_to_nexp ctx y)
+         | "<=" -> NC_bounded_le (pc_to_nexp ctx x, pc_to_nexp ctx y)
+         | ">" -> NC_bounded_gt (pc_to_nexp ctx x, pc_to_nexp ctx y)
+         | "<" -> NC_bounded_lt (pc_to_nexp ctx x, pc_to_nexp ctx y)
+         | op ->
+            raise (Reporting.err_typ l ("Unknown chain comparison operator " ^ op))
+       in
+       (l, NC_aux (nc, l)) :: go ops (y :: zs)
+    | [], _ -> []
+    | _, _ ->
+       Reporting.unreachable Parse_ast.Unknown __POS__ "Invalid operator chain"
+  in
+  match go (List.rev ops) cs with
+  | (l, x) :: rest ->
+     List.fold_left (fun (ll, x) (lr, y) ->
+         let l = merge_range ll lr in
+         (l, NC_aux (NC_and (x, y), l))
+       ) (l, x) rest
+     |> snd
+     |> (fun x -> Constraint x)
+  | [] ->
+     Reporting.unreachable Parse_ast.Unknown __POS__ "Empty operator chain"
+ 
 and to_ast_constraint ctx (P.ATyp_aux (aux, l)) =
   let aux = match aux with
     | P.ATyp_app (Id_aux (Operator op, _) as id, [t1; t2]) ->
@@ -245,24 +457,25 @@ and to_ast_constraint ctx (P.ATyp_aux (aux, l)) =
        | "|" -> NC_or (to_ast_constraint ctx t1, to_ast_constraint ctx t2)
        | _ ->
           let id = to_ast_id ctx id in
-          match Bindings.find_opt id ctx.type_constructors with
-          | None -> raise (Reporting.err_typ l (sprintf "Could not find type constructor %s" (string_of_id id)))
-          | Some kinds when List.length kinds <> 2 ->
-             raise (Reporting.err_typ l (sprintf "%s : %s -> Bool expected %d arguments, given 2"
-                                                 (string_of_id id) (format_kind_aux_list kinds)
-                                                 (List.length kinds)))
-          | Some kinds -> NC_app (id, List.map2 (to_ast_typ_arg ctx) [t1; t2] kinds)
+          let (kinds, _) = get_type_constructor l id 2 ctx in
+          NC_app (id, List.map2 (to_ast_typ_arg ctx) [t1; t2] kinds)
        end
     | P.ATyp_app (id, args) ->
        let id = to_ast_id ctx id in
-       begin match Bindings.find_opt id ctx.type_constructors with
-       | None -> raise (Reporting.err_typ l (sprintf "Could not find type constructor %s" (string_of_id id)))
-       | Some kinds when List.length args <> List.length kinds ->
-          raise (Reporting.err_typ l (sprintf "%s : %s -> Bool expected %d arguments, given %d"
-                                              (string_of_id id) (format_kind_aux_list kinds)
-                                              (List.length kinds) (List.length args)))
-       | Some kinds -> NC_app (id, List.map2 (to_ast_typ_arg ctx) args kinds)
-       end
+       let (kinds, _) = get_type_constructor l id (List.length args) ctx in
+       NC_app (id, List.map2 (to_ast_typ_arg ctx) args kinds)
+    | P.ATyp_infix ityps ->
+       let ityps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) ityps in
+       let rpn = Typ_infix_parser.parse ctx ityps in
+       Typ_infix_parser.tree
+         ~f:(fun x -> Raw x)
+         ~prefix:(fun _ _ -> raise (Reporting.err_typ l "Invalid constraint in type"))
+         ~operator:(binary_constraint ctx)
+         ~chain:(chain_constraint ctx)
+         rpn
+       |> (function
+           | Constraint (NC_aux (aux, _)) -> aux
+           | _ -> raise (Reporting.err_typ l "Invalid constraint in type"))
     | P.ATyp_var v -> NC_var (to_ast_var v)
     | P.ATyp_lit (P.L_aux (P.L_true, _)) -> NC_true
     | P.ATyp_lit (P.L_aux (P.L_false, _)) -> NC_false
@@ -348,6 +561,11 @@ let rec to_ast_pat ctx (P.P_aux (pat, l)) =
           | P.P_string_append pats -> P_string_append (List.map (to_ast_pat ctx) pats)
          ), (l,()))
 
+type partial_lexp =
+  | Lexp of unit lexp
+  | Exp of unit exp
+  | Raw of P.exp
+
 let rec to_ast_letbind ctx (P.LB_aux(lb,l) : P.letbind) : unit letbind =
   LB_aux(
     (match lb with
@@ -355,6 +573,25 @@ let rec to_ast_letbind ctx (P.LB_aux(lb,l) : P.letbind) : unit letbind =
       LB_val(to_ast_pat ctx pat, to_ast_exp ctx exp)
     ), (l,()))
 
+and binary_exp op (E_aux (e1_aux, (l1, _)) as e1) (E_aux (_, (l2, _)) as e2) =
+  let l = merge_range l1 l2 in
+  if Id.compare op (mk_id "::") = 0 then
+    E_aux (E_cons (e1, e2), (l, ()))
+  else if Id.compare op (mk_id "@") = 0 then
+    E_aux (E_vector_append (e1, e2), (l, ()))
+  else if Id.compare op (mk_id "^") = 0 then
+    begin match e1_aux with
+    | E_lit (L_aux (L_num c, _)) when Big_int.equal c (Big_int.of_int 2) ->
+       E_aux (E_app (mk_id "pow2", [e2]), (l, ()))
+    | _ ->
+       E_aux (E_app_infix (e1, op, e2), (l, ()))
+    end
+  else
+    E_aux (E_app_infix (e1, op, e2), (l, ()))
+
+and prefix_exp p (E_aux (_, (l, _)) as e) =
+  E_aux (E_app (p, [e]), (l, ())) 
+  
 and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
   E_aux(
     (match exp with
@@ -389,13 +626,23 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
       (match List.map (to_ast_exp ctx) args with
 	| [] -> E_app (to_ast_id ctx f, [])
         | exps -> E_app (to_ast_id ctx f, exps))
+    | P.E_infix iexps ->
+       let iexps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) iexps in
+       let rpn = Exp_infix_parser.parse ctx iexps in
+       Exp_infix_parser.tree
+         ~f:(to_ast_exp ctx)
+         ~prefix:prefix_exp
+         ~operator:binary_exp
+         ~chain:(fun _ _ -> raise (Reporting.err_general l "Chained comparisons only allowed in types"))
+         rpn
+       |> (fun (E_aux (aux, _)) -> aux)
     | P.E_app_infix(left,op,right) ->
-      E_app_infix(to_ast_exp ctx left, to_ast_id ctx op, to_ast_exp ctx right)
+       E_app_infix(to_ast_exp ctx left, to_ast_id ctx op, to_ast_exp ctx right)
     | P.E_tuple(exps) -> E_tuple(List.map (to_ast_exp ctx) exps)
     | P.E_if(e1,e2,e3) -> E_if(to_ast_exp ctx e1, to_ast_exp ctx e2, to_ast_exp ctx e3)
     | P.E_for(id,e1,e2,e3,atyp,e4) ->
-      E_for(to_ast_id ctx id,to_ast_exp ctx e1, to_ast_exp ctx e2,
-            to_ast_exp ctx e3,to_ast_order ctx atyp, to_ast_exp ctx e4)
+       E_for(to_ast_id ctx id,to_ast_exp ctx e1, to_ast_exp ctx e2,
+             to_ast_exp ctx e3,to_ast_order ctx atyp, to_ast_exp ctx e4)
     | P.E_loop (P.While, m, e1, e2) -> E_loop (While, to_ast_measure ctx m, to_ast_exp ctx e1, to_ast_exp ctx e2)
     | P.E_loop (P.Until, m, e1, e2) -> E_loop (Until, to_ast_measure ctx m, to_ast_exp ctx e1, to_ast_exp ctx e2)
     | P.E_vector(exps) -> E_vector(List.map (to_ast_exp ctx) exps)
@@ -407,7 +654,6 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
     | P.E_vector_update_subrange(vex,e1,e2,e3) ->
       E_vector_update_subrange(to_ast_exp ctx vex, to_ast_exp ctx e1,
 			       to_ast_exp ctx e2, to_ast_exp ctx e3)
-    | P.E_vector_append(e1,e2) -> E_vector_append(to_ast_exp ctx e1,to_ast_exp ctx e2)
     | P.E_list(exps) -> E_list(List.map (to_ast_exp ctx) exps)
     | P.E_cons(e1,e2) -> E_cons(to_ast_exp ctx e1, to_ast_exp ctx e2)
     | P.E_record fexps ->
@@ -440,8 +686,6 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
          E_internal_return(to_ast_exp ctx exp)
        else
          raise (Reporting.err_general l "Internal return construct found without -dmagic_hash")
-    | P.E_deref exp ->
-       E_app (Id_aux (Id "__deref", l), [to_ast_exp ctx exp])
     ), (l,()))
 
 and to_ast_measure ctx (P.Measure_aux(m,l)) : unit internal_loop_measure =
@@ -453,11 +697,47 @@ and to_ast_measure ctx (P.Measure_aux(m,l)) : unit internal_loop_measure =
        else
          raise (Reporting.err_general l "Internal loop termination measure found without -dmagic_hash")
   in Measure_aux (m,l)
+   
+and pl_to_exp ctx = function
+  | Raw (P.E_aux (_, l) as exp) -> to_ast_exp ctx exp
+  | Exp exp -> exp
+  | Lexp (LEXP_aux (_, (l, _))) ->
+     raise (Reporting.err_typ l "Expected expression, found assignment")
 
+and pl_to_lexp ctx = function
+  | Raw (P.E_aux (_, l) as exp) -> to_ast_lexp ctx exp
+  | Lexp lexp -> lexp
+  | Exp (E_aux (_, (l, _))) ->
+     raise (Reporting.err_typ l "Expected assignment, found expression")
+
+and pl_get_loc = function
+  | Raw (P.E_aux (_, l)) -> l
+  | Exp (E_aux (_, (l, _))) -> l
+  | Lexp (LEXP_aux (_, (l, _))) -> l
+
+and binary_lexp ctx op e1 e2 =
+  let l = merge_range (pl_get_loc e1) (pl_get_loc e2) in
+  if Id.compare op (mk_id "@") = 0 then
+    let lexp1 = pl_to_lexp ctx e1 in
+    match pl_to_lexp ctx e2 with
+    | LEXP_aux (LEXP_vector_concat rest, _) ->
+       Lexp (LEXP_aux (LEXP_vector_concat (lexp1 :: rest), (l, ())))
+    | lexp2 ->
+       Lexp (LEXP_aux (LEXP_vector_concat [lexp1; lexp2], (l, ())))
+  else
+    raise (Reporting.err_general l ("Unknown operator " ^ string_of_id op ^ " in assignment"))
+ 
+and prefix_lexp ctx p e =
+  let l = pl_get_loc e in
+  if Id.compare p (mk_id "__deref") = 0 then
+    let e = pl_to_exp ctx e in
+    Lexp (LEXP_aux (LEXP_deref e, (l, ())))
+  else
+    raise (Reporting.err_general l ("Unknown unary operator " ^ string_of_id p ^ " in assignment"))
+   
 and to_ast_lexp ctx (P.E_aux(exp,l) : P.exp) : unit lexp =
   let lexp = match exp with
     | P.E_id id -> LEXP_id (to_ast_id ctx id)
-    | P.E_deref exp -> LEXP_deref (to_ast_exp ctx exp)
     | P.E_cast (typ, P.E_aux (P.E_id id, l')) ->
        LEXP_cast (to_ast_typ ctx typ, to_ast_id ctx id)
     | P.E_tuple tups ->
@@ -470,6 +750,8 @@ and to_ast_lexp ctx (P.E_aux(exp,l) : P.exp) : unit lexp =
        in
        List.iter is_ok_in_tup ltups;
        LEXP_tup ltups
+    | P.E_app (P.Id_aux (Id "__deref", l), [exp]) ->
+       LEXP_deref (to_ast_exp ctx exp)
     | P.E_app ((P.Id_aux (f, l') as f'), args) ->
        begin match f with
        | P.Id(id) ->
@@ -479,8 +761,18 @@ and to_ast_lexp ctx (P.E_aux(exp,l) : P.exp) : unit lexp =
            | args -> LEXP_memory(to_ast_id ctx f', args))
        | _ -> raise (Reporting.err_typ l' "memory call on lefthand side of assignment must begin with an id")
        end
-    | P.E_vector_append (exp1, exp2) ->
-       LEXP_vector_concat (to_ast_lexp ctx exp1 :: to_ast_lexp_vector_concat ctx exp2)
+    | P.E_infix iexps ->
+       let iexps = List.map (Infix_parser.map_infix_token_id (to_ast_id ctx)) iexps in
+       let rpn = Exp_infix_parser.parse ctx iexps in
+       Exp_infix_parser.tree
+         ~f:(fun x -> Raw x)
+         ~prefix:(prefix_lexp ctx)
+         ~operator:(binary_lexp ctx)
+         ~chain:(fun _ _ -> raise (Reporting.err_general l "Chained comparisons only allowed in types"))
+         rpn
+       |> (function
+           | Lexp (LEXP_aux (aux, _)) -> aux
+           | _ -> raise (Reporting.err_typ l "Invalid assignment"))
     | P.E_vector_access (vexp, exp) -> LEXP_vector (to_ast_lexp ctx vexp, to_ast_exp ctx exp)
     | P.E_vector_subrange (vexp, exp1, exp2) ->
        LEXP_vector_range (to_ast_lexp ctx vexp, to_ast_exp ctx exp1, to_ast_exp ctx exp2)
@@ -488,12 +780,6 @@ and to_ast_lexp ctx (P.E_aux(exp,l) : P.exp) : unit lexp =
     | _ -> raise (Reporting.err_typ l "Only identifiers, cast identifiers, vector accesses, vector slices, and fields can be on the lefthand side of an assignment")
   in
   LEXP_aux (lexp, (l, ()))
-
-and to_ast_lexp_vector_concat ctx (P.E_aux (exp_aux, l) as exp) =
-  match exp_aux with
-  | P.E_vector_append (exp1, exp2) ->
-     to_ast_lexp ctx exp1 :: to_ast_lexp_vector_concat ctx exp2
-  | _ -> [to_ast_lexp ctx exp]
 
 and to_ast_case ctx (P.Pat_aux(pex,l) : P.pexp) : unit pexp =
   match pex with
@@ -582,9 +868,9 @@ let to_ast_type_union ctx = function
   | P.Tu_aux (_, l) ->
      raise (Reporting.err_unreachable l __POS__ "Anonymous record type should have been rewritten by now")
 
-let add_constructor id typq ctx =
+let add_constructor id typq ret_kind ctx =
   let kinds = List.map (fun kopt -> unaux_kind (kopt_kind kopt)) (quant_kopts typq) in
-  { ctx with type_constructors = Bindings.add id kinds ctx.type_constructors }
+  { ctx with type_constructors = Bindings.add id (kinds, ret_kind) ctx.type_constructors }
 
 let anon_rec_constructor_typ record_id = function
   | P.TypQ_aux (P.TypQ_no_forall, l) -> P.ATyp_aux (P.ATyp_id record_id, Generated l)
@@ -681,14 +967,14 @@ let rec to_ast_typedef ctx (P.TD_aux (aux, l) : P.type_def) : unit def list ctx_
      let kind = to_ast_kind kind in
      let typ_arg = to_ast_typ_arg typq_ctx typ_arg (unaux_kind kind) in
      [DEF_type (TD_aux (TD_abbrev (id, typq, typ_arg), (l, ())))],
-     add_constructor id typq ctx
+     add_constructor id typq (unaux_kind kind) ctx
 
   | P.TD_record (id, typq, fields, _) ->
      let id = to_ast_reserved_type_id ctx id in
      let typq, typq_ctx = to_ast_typquant ctx typq in
      let fields = List.map (fun (atyp, id) -> to_ast_typ typq_ctx atyp, to_ast_id ctx id) fields in
      [DEF_type (TD_aux (TD_record (id, typq, fields, false), (l, ())))],
-     add_constructor id typq ctx
+     add_constructor id typq K_type ctx
 
   | P.TD_variant (id, typq, arms, _) as union ->
      (* First generate auxilliary record types for anonymous records in constructors *)
@@ -708,23 +994,23 @@ let rec to_ast_typedef ctx (P.TD_aux (aux, l) : P.type_def) : unit def list ctx_
      (* Now generate the AST union type *)
      let id = to_ast_reserved_type_id ctx id in
      let typq, typq_ctx = to_ast_typquant ctx typq in
-     let arms = List.map (to_ast_type_union (add_constructor id typq typq_ctx)) arms in
+     let arms = List.map (to_ast_type_union (add_constructor id typq K_type typq_ctx)) arms in
      [DEF_type (TD_aux (TD_variant (id, typq, arms, false), (l, ())))] @ generated_records,
-     add_constructor id typq ctx
+     add_constructor id typq K_type ctx
 
   | P.TD_enum (id, fns, enums, _) ->
      let id = to_ast_reserved_type_id ctx id in
      let fns = generate_enum_functions l ctx id fns enums in
      let enums = List.map (fun e -> to_ast_id ctx (fst e)) enums in
      fns @ [DEF_type (TD_aux (TD_enum (id, enums, false), (l, ())))],
-     { ctx with type_constructors = Bindings.add id [] ctx.type_constructors }
+     { ctx with type_constructors = Bindings.add id ([], K_type) ctx.type_constructors }
 
   | P.TD_bitfield (id, typ, ranges) ->
      let id = to_ast_reserved_type_id ctx id in
      let typ = to_ast_typ ctx typ in
      let ranges = List.map (fun (id, range) -> (to_ast_id ctx id, to_ast_range ctx range)) ranges in
      [DEF_type (TD_aux (TD_bitfield (id, typ, ranges), (l, ())))],
-     { ctx with type_constructors = Bindings.add id [] ctx.type_constructors }
+     { ctx with type_constructors = Bindings.add id ([], K_type) ctx.type_constructors }
 
 let to_ast_rec ctx (P.Rec_aux(r,l): P.rec_opt) : unit rec_opt =
   Rec_aux((match r with
@@ -831,7 +1117,7 @@ let to_ast_scattered ctx (P.SD_aux (aux, l)) =
        let id = to_ast_id ctx id in
        let typq, typq_ctx = to_ast_typquant ctx typq in
        SD_variant (id, typq),
-       add_constructor id typq { ctx with scattereds = Bindings.add id typq_ctx ctx.scattereds }
+       add_constructor id typq K_type { ctx with scattereds = Bindings.add id typq_ctx ctx.scattereds }
     | P.SD_unioncl (id, tu) ->
        let id = to_ast_id ctx id in
        begin match Bindings.find_opt id ctx.scattereds with
@@ -867,12 +1153,34 @@ let to_ast_loop_measure ctx = function
   | P.Loop (P.While, exp) -> Loop (While, to_ast_exp ctx exp)
   | P.Loop (P.Until, exp) -> Loop (Until, to_ast_exp ctx exp)
 
+let format_prec prec n =
+  (match prec with
+   | InfixL -> "left-associative"
+    | InfixR -> "right-associative"
+    | Infix -> "non-associative")
+  ^ " at level " ^ Big_int.to_string n
+ 
 let rec to_ast_def ctx def : unit def list ctx_out =
   match def with
   | P.DEF_overload (id, ids) ->
      [DEF_overload (to_ast_id ctx id, List.map (to_ast_id ctx) ids)], ctx
   | P.DEF_fixity (prec, n, op) ->
-     [DEF_fixity (to_ast_prec prec, n, to_ast_id ctx op)], ctx
+     let op = to_ast_id ctx op in
+     let prec = to_ast_prec prec in
+     let ctx = match Bindings.find_opt op ctx.fixity with
+       | Some (existing_prec, existing_n, existing_l) ->
+          if prec = existing_prec && Big_int.equal n existing_n then
+            ctx
+          else
+            raise (Reporting.err_general (P.Hint ("previously declared here", existing_l, id_loc op))
+                     (Printf.sprintf "Mismatched infix declaration for %s, previously %s, now %s"
+                        (string_of_id op)
+                        (format_prec existing_prec existing_n)
+                        (format_prec prec n)))
+       | None ->
+          { ctx with fixity = Bindings.add op (prec, n, id_loc op) ctx.fixity }
+     in
+     [DEF_fixity (prec, n, op)], ctx
   | P.DEF_type t_def ->
      to_ast_typedef ctx t_def
   | P.DEF_fundef f_def ->
@@ -962,29 +1270,54 @@ let to_ast ctx (P.Defs files) =
 
 let initial_ctx = {
     type_constructors =
-      List.fold_left (fun m (k, v) -> Bindings.add (mk_id k) v m) Bindings.empty
-        [ ("bool", []);
-          ("nat", []);
-          ("int", []);
-          ("unit", []);
-          ("bit", []);
-          ("string", []);
-          ("real", []);
-          ("list", [K_type]);
-          ("register", [K_type]);
-          ("range", [K_int; K_int]);
-          ("bitvector", [K_int; K_order]);
-          ("vector", [K_int; K_order; K_type]);
-          ("atom", [K_int]);
-          ("implicit", [K_int]);
-          ("itself", [K_int]);
-          ("not", [K_bool]);
+      List.fold_left (fun m (k, v, r) -> Bindings.add (mk_id k) (v, r) m) Bindings.empty
+        [ ("bool", [], K_type);
+          ("nat", [], K_type);
+          ("int", [], K_type);
+          ("unit", [], K_type);
+          ("bit", [], K_type);
+          ("string", [], K_type);
+          ("real", [], K_type);
+          ("list", [K_type], K_type);
+          ("register", [K_type], K_type);
+          ("range", [K_int; K_int], K_type);
+          ("bitvector", [K_int; K_order], K_type);
+          ("vector", [K_int; K_order; K_type], K_type);
+          ("atom", [K_int], K_type);
+          ("implicit", [K_int], K_type);
+          ("itself", [K_int], K_type);
+          ("not", [K_bool], K_bool);
         ];
     kinds = KBindings.empty;
     scattereds = Bindings.empty;
     reserved_type_ids = [mk_id "result"; mk_id "option"];
     internal_files = [];
     target_sets = [];
+    fixity =
+      List.fold_left (fun m (op, prec, n) -> Bindings.add (mk_id op) (prec, Big_int.of_int n, P.Unknown) m) Bindings.empty
+        [ ("^", InfixR, 8);
+          ("*", InfixL, 7);
+          ("/", InfixL, 7);
+          ("%", InfixL, 7);
+          ("+", InfixL, 6);
+          ("-", InfixL, 6);
+          ("@", InfixR, 5);
+          ("::", InfixR, 5);
+          ("<", Infix, 4);
+          ("<=", Infix, 4);
+          (">", Infix, 4);
+          (">=", Infix, 4);
+          ("==", Infix, 4);
+          ("!=", Infix, 4);
+          ("&", InfixR, 3);
+          ("|", InfixR, 2);
+        ];
+    prefix_fixity =
+      List.fold_left (fun m (p, n) -> Bindings.add (mk_id p) (Big_int.of_int n) m) Bindings.empty
+        [ ("~", 4);
+          ("negate", 8);
+          ("__deref", 9);
+        ];
   }
 
 let exp_of_string str =

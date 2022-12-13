@@ -142,7 +142,7 @@ kid =
 type 
 id = 
   Id_aux of id_aux * l
-
+          
 type
 lit_aux =  (* Literal constant *)
    L_unit (* $() : _$ *)
@@ -167,9 +167,6 @@ atyp_aux =  (* expressions of all kinds, to be translated to types, nats, orders
  | ATyp_var of kid (* ticked variable *)
  | ATyp_lit of lit (* literal *)
  | ATyp_nset of kid * (Big_int.num) list (* set type *)
- | ATyp_times of atyp * atyp (* product *)
- | ATyp_sum of atyp * atyp (* sum *)
- | ATyp_minus of atyp * atyp (* subtraction *)
  | ATyp_exp of atyp (* exponential *)
  | ATyp_neg of atyp (* Internal (but not M as I want a datatype constructor) negative nexp *)
  | ATyp_inc (* increasing *)
@@ -181,9 +178,10 @@ atyp_aux =  (* expressions of all kinds, to be translated to types, nats, orders
  | ATyp_wild
  | ATyp_tup of (atyp) list (* Tuple type *)
  | ATyp_app of id * (atyp) list (* type constructor application *)
+ | ATyp_infix of (atyp, id) Infix_parser.infix_token list
  | ATyp_exist of kinded_id list * atyp * atyp
  | ATyp_base of id * atyp * atyp
-
+ 
 and atyp = 
    ATyp_aux of atyp_aux * l
 
@@ -260,17 +258,17 @@ type measure_aux =  (* optional termination measure for a loop *)
 
 and measure = 
  | Measure_aux of measure_aux * l
-
+ 
 and
 exp_aux =  (* Expression *)
    E_block of (exp) list (* block (parsing conflict with structs?) *)
  | E_id of id (* identifier *)
  | E_ref of id
- | E_deref of exp
  | E_lit of lit (* literal constant *)
  | E_cast of atyp * exp (* cast *)
  | E_app of id * (exp) list (* function application *)
  | E_app_infix of exp * id * exp (* infix function application *)
+ | E_infix of (exp, id) Infix_parser.infix_token list
  | E_tuple of (exp) list (* tuple *)
  | E_if of exp * exp * exp (* conditional *)
  | E_loop of loop * measure * exp * exp
@@ -280,7 +278,6 @@ exp_aux =  (* Expression *)
  | E_vector_subrange of exp * exp * exp (* subvector extraction *)
  | E_vector_update of exp * exp * exp (* vector functional update *)
  | E_vector_update_subrange of exp * exp * exp * exp (* vector subrange update (with vector) *)
- | E_vector_append of exp * exp (* vector concatenation *)
  | E_list of (exp) list (* list *)
  | E_cons of exp * exp (* cons *)
  | E_record of exp list (* struct *)

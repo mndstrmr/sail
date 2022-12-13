@@ -72,6 +72,14 @@ open Parse_ast
 
 let loc n m = Range (n, m)
 
+let first_pat_range other = function
+  | P_aux (_, Range (pos, _)) -> pos
+  | _ -> other
+
+let first_mpat_range other = function
+  | MP_aux (_, Range (pos, _)) -> pos
+  | _ -> other
+ 
 let default_opt x = function
   | None -> x
   | Some y -> y
@@ -92,10 +100,27 @@ let mk_kopt k n m = KOpt_aux (k, loc n m)
 let id_of_kid = function
   | Kid_aux (Var v, l) -> Id_aux (Id (String.sub v 1 (String.length v - 1)), l)
 
-let deinfix = function
-  | (Id_aux (Id v, l)) -> Id_aux (Operator v, l)
-  | (Id_aux (Operator v, l)) -> Id_aux (Id v, l)
+let simp_infix = function
+  | E_aux (E_infix [Infix_parser.Primary exp], _) -> exp
+  | exp -> exp
 
+let simp_infix_typ = function
+  | ATyp_aux (ATyp_infix [Infix_parser.Primary typ], _) -> typ
+  | typ -> typ
+
+let rec same_pat_ops (Id_aux (_, l) as op) = function
+  | ((Id_aux (_, l') as op'), _) :: ops ->
+     if string_of_id op = string_of_id op' then
+       same_pat_ops op ops
+     else
+       raise (Reporting.err_syntax_loc
+                (Parse_ast.Hint (string_of_id op ^ " here", l, l'))
+                (Printf.sprintf "Use parenthesis to group operators in pattern. Operators %s and %s found at same level."
+                                (string_of_id op)
+                                (string_of_id op')))
+  | [] -> ()
+    
+         
 let mk_effect e n m = BE_aux (e, loc n m)
 let mk_typ t n m = ATyp_aux (t, loc n m)
 let mk_pat p n m = P_aux (p, loc n m)
@@ -171,42 +196,6 @@ let mk_eannotn = Effect_opt_aux(Effect_opt_none,Unknown)
 
 let mk_typq kopts nc n m = TypQ_aux (TypQ_tq (List.map qi_id_of_kopt kopts @ nc), loc n m)
 
-type lchain =
-  LC_lt
-| LC_lteq
-| LC_nexp of atyp
-
-let tyop op t1 t2 s e = mk_typ (ATyp_app (Id_aux (Operator op, loc s e), [t1; t2])) s e
-
-let rec desugar_lchain chain s e =
-  match chain with
-  | [LC_nexp n1; LC_lteq; LC_nexp n2] -> tyop "<=" n1 n2 s e
-  | [LC_nexp n1; LC_lt; LC_nexp n2] -> tyop "<" n1 n2 s e
-  | (LC_nexp n1 :: LC_lteq :: LC_nexp n2 :: chain) ->
-     let nc1 = tyop "<=" n1 n2 s e in
-     tyop "&" nc1 (desugar_lchain (LC_nexp n2 :: chain) s e) s e
-  | (LC_nexp n1 :: LC_lt :: LC_nexp n2 :: chain) ->
-     let nc1 = tyop "<" n1 n2 s e in
-     tyop "&" nc1 (desugar_lchain (LC_nexp n2 :: chain) s e) s e
-  | _ -> assert false
-
-type rchain =
-  RC_gt
-| RC_gteq
-| RC_nexp of atyp
-
-let rec desugar_rchain chain s e =
-  match chain with
-  | [RC_nexp n1; RC_gteq; RC_nexp n2] -> tyop ">=" n1 n2 s e
-  | [RC_nexp n1; RC_gt; RC_nexp n2] -> tyop ">" n1 n2 s e
-  | (RC_nexp n1 :: RC_gteq :: RC_nexp n2 :: chain) ->
-     let nc1 = tyop ">=" n1 n2 s e in
-     tyop "&" nc1 (desugar_rchain (RC_nexp n2 :: chain) s e) s e
-  | (RC_nexp n1 :: RC_gt :: RC_nexp n2 :: chain) ->
-     let nc1 = tyop ">" n1 n2 s e in
-     tyop "&" nc1 (desugar_rchain (RC_nexp n2 :: chain) s e) s e
-  | _ -> assert false
-
 type vector_update =
   VU_single of exp * exp
 | VU_range of exp * exp * exp
@@ -241,9 +230,9 @@ let warn_extern_effect l =
 
 /*Terminals with no content*/
 
-%token And As Assert Bitzero Bitone By Match Clause Dec Default Effect End Op
+%token And As Assert Bitzero Bitone By Match Clause Dec Default Effect End Op Star
 %token Enum Else False Forall Foreach Overload Function_ Mapping If_ In Inc Let_ Int Order Bool Cast
-%token Pure Monadic Register Return Scattered Sizeof Struct Then True TwoCaret TYPE Typedef
+%token Pure Monadic Register Return Scattered Sizeof Struct Then True TYPE Typedef
 %token Undefined Union Newtype With Val Outcome Constraint Throw Try Catch Exit Bitfield Constant
 %token Barr Depend Rreg Wreg Rmem Wmem Wmv Eamem Exmem Undef Unspec Nondet Escape
 %token Repeat Until While Do Mutual Var Ref Configuration TerminationMeasure Instantiation Impl
@@ -253,7 +242,7 @@ let warn_extern_effect l =
 %nonassoc Then
 %nonassoc Else
 
-%token Bar Comma Dot Eof Minus Semi Under DotDot
+%token Bar Comma Dot Eof Minus Semi Under DotDot At ColonColon Caret
 %token Lcurly Rcurly Lparen Rparen Lsquare Rsquare LcurlyBar RcurlyBar LsquareBar RsquareBar
 %token MinusGt Bidir
 
@@ -263,17 +252,12 @@ let warn_extern_effect l =
 %token <Nat_big_num.num> Num
 %token <string> String Bin Hex Real
 
-%token <string> Amp At Caret Eq Gt Lt Plus Star EqGt Unit
-%token <string> Colon ColonColon ExclEq
-%token <string> EqEq
-%token <string> GtEq
-%token <string> LtEq
+%token <string> Eq EqGt Unit
+%token <string> Colon
 
 %token <string> Doc
 
-%token <string> Op0 Op1 Op2 Op3 Op4 Op5 Op6 Op7 Op8 Op9
-%token <string> Op0l Op1l Op2l Op3l Op4l Op5l Op6l Op7l Op8l Op9l
-%token <string> Op0r Op1r Op2r Op3r Op4r Op5r Op6r Op7r Op8r Op9r
+%token <string> OpId
 
 %token <string * string> Pragma
 
@@ -294,85 +278,57 @@ let warn_extern_effect l =
 
 id:
   | Id { mk_id (Id $1) $startpos $endpos }
+  | Op OpId { mk_id (Operator $2) $startpos $endpos }
+  | Op Minus { mk_id (Operator "-") $startpos $endpos }
+  | Op Bar { mk_id (Operator "|") $startpos $endpos }
+  | Op Caret { mk_id (Operator "^") $startpos $endpos }
+  | Op Star { mk_id (Operator "*") $startpos $endpos }
 
-  | Op Op0 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op1 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op2 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op3 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op4 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op5 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op6 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op7 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op8 { mk_id (Operator $2) $startpos $endpos }
-  | Op Op9 { mk_id (Operator $2) $startpos $endpos }
+op_no_caret:
+  | OpId
+    { mk_id (Id $1) $startpos $endpos }
+  | Minus
+    { mk_id (Id "-") $startpos $endpos }
+  | Bar
+    { mk_id (Id "|") $startpos $endpos }
+  | Star
+    { mk_id (Id "*") $startpos $endpos }
 
-  | Op Op0l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op1l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op2l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op3l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op4l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op5l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op6l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op7l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op8l { mk_id (Operator $2) $startpos $endpos }
-  | Op Op9l { mk_id (Operator $2) $startpos $endpos }
+op:
+  | OpId
+    { mk_id (Id $1) $startpos $endpos }
+  | Minus
+    { mk_id (Id "-") $startpos $endpos }
+  | Bar
+    { mk_id (Id "|") $startpos $endpos }
+  | Caret
+    { mk_id (Id "^") $startpos $endpos }
+  | Star
+    { mk_id (Id "*") $startpos $endpos }
 
-  | Op Op0r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op1r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op2r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op3r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op4r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op5r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op6r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op7r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op8r { mk_id (Operator $2) $startpos $endpos }
-  | Op Op9r { mk_id (Operator $2) $startpos $endpos }
+exp_op:
+  | OpId
+    { mk_id (Id $1) $startpos $endpos }
+  | Minus
+    { mk_id (Id "-") $startpos $endpos }
+  | Bar
+    { mk_id (Id "|") $startpos $endpos }
+  | At
+    { mk_id (Id "@") $startpos $endpos }
+  | ColonColon
+    { mk_id (Id "::") $startpos $endpos }
+  | Caret
+    { mk_id (Id "^") $startpos $endpos }
+  | Star
+    { mk_id (Id "*") $startpos $endpos }
 
-  | Op Plus   { mk_id (Operator "+")  $startpos $endpos }
-  | Op Minus  { mk_id (Operator "-")  $startpos $endpos }
-  | Op Star   { mk_id (Operator "*")  $startpos $endpos }
-  | Op EqEq   { mk_id (Operator "==") $startpos $endpos }
-  | Op ExclEq { mk_id (Operator "!=") $startpos $endpos }
-  | Op Lt     { mk_id (Operator "<")  $startpos $endpos }
-  | Op Gt     { mk_id (Operator ">")  $startpos $endpos }
-  | Op LtEq   { mk_id (Operator "<=") $startpos $endpos }
-  | Op GtEq   { mk_id (Operator ">=") $startpos $endpos }
-  | Op Amp    { mk_id (Operator "&")  $startpos $endpos }
-  | Op Bar    { mk_id (Operator "|")  $startpos $endpos }
-  | Op Caret  { mk_id (Operator "^")  $startpos $endpos }
-
-op0: Op0 { mk_id (Id $1) $startpos $endpos }
-op1: Op1 { mk_id (Id $1) $startpos $endpos }
-op2: Op2 { mk_id (Id $1) $startpos $endpos }
-op3: Op3 { mk_id (Id $1) $startpos $endpos }
-op4: Op4 { mk_id (Id $1) $startpos $endpos }
-op5: Op5 { mk_id (Id $1) $startpos $endpos }
-op6: Op6 { mk_id (Id $1) $startpos $endpos }
-op7: Op7 { mk_id (Id $1) $startpos $endpos }
-op8: Op8 { mk_id (Id $1) $startpos $endpos }
-op9: Op9 { mk_id (Id $1) $startpos $endpos }
-
-op0l: Op0l { mk_id (Id $1) $startpos $endpos }
-op1l: Op1l { mk_id (Id $1) $startpos $endpos }
-op2l: Op2l { mk_id (Id $1) $startpos $endpos }
-op3l: Op3l { mk_id (Id $1) $startpos $endpos }
-op4l: Op4l { mk_id (Id $1) $startpos $endpos }
-op5l: Op5l { mk_id (Id $1) $startpos $endpos }
-op6l: Op6l { mk_id (Id $1) $startpos $endpos }
-op7l: Op7l { mk_id (Id $1) $startpos $endpos }
-op8l: Op8l { mk_id (Id $1) $startpos $endpos }
-op9l: Op9l { mk_id (Id $1) $startpos $endpos }
-
-op0r: Op0r { mk_id (Id $1) $startpos $endpos }
-op1r: Op1r { mk_id (Id $1) $startpos $endpos }
-op2r: Op2r { mk_id (Id $1) $startpos $endpos }
-op3r: Op3r { mk_id (Id $1) $startpos $endpos }
-op4r: Op4r { mk_id (Id $1) $startpos $endpos }
-op5r: Op5r { mk_id (Id $1) $startpos $endpos }
-op6r: Op6r { mk_id (Id $1) $startpos $endpos }
-op7r: Op7r { mk_id (Id $1) $startpos $endpos }
-op8r: Op8r { mk_id (Id $1) $startpos $endpos }
-op9r: Op9r { mk_id (Id $1) $startpos $endpos }
+pat_op:
+  | At
+    { mk_id (Id "@") $startpos $endpos }
+  | ColonColon
+    { mk_id (Id "::") $startpos $endpos }
+  | Caret
+    { mk_id (Id "^") $startpos $endpos }
 
 id_list:
   | id
@@ -390,26 +346,6 @@ num_list:
   | Num Comma num_list
     { $1 :: $3 }
 
-lchain:
-  | typ5 LtEq typ5
-    { [LC_nexp $1; LC_lteq; LC_nexp $3] }
-  | typ5 Lt typ5
-    { [LC_nexp $1; LC_lt; LC_nexp $3] }
-  | typ5 LtEq lchain
-    { LC_nexp $1 :: LC_lteq :: $3 }
-  | typ5 Lt lchain
-    { LC_nexp $1 :: LC_lt :: $3 }
-
-rchain:
-  | typ5 GtEq typ5
-    { [RC_nexp $1; RC_gteq; RC_nexp $3] }
-  | typ5 Gt typ5
-    { [RC_nexp $1; RC_gt; RC_nexp $3] }
-  | typ5 GtEq rchain
-    { RC_nexp $1 :: RC_gteq :: $3 }
-  | typ5 Gt rchain
-    { RC_nexp $1 :: RC_gt :: $3 }
-
 tyarg:
   | Lparen typ_list Rparen
     { [], $2 }
@@ -418,174 +354,36 @@ typ_eof:
   | typ Eof
     { $1 }
 
+%inline prefix_typ_op:
+  |
+    { [] }
+  | Minus
+    { [Infix_parser.Prefix (mk_id (Id "negate") $startpos $endpos)] }
+  | Star
+    { [Infix_parser.Prefix (mk_id (Id "__deref") $startpos $endpos)] }
+
+/* When we parse a type from a pattern, we can't parse a ^ immediately because that's used for string append patterns */
+typ_no_caret:
+  | prefix = prefix_typ_op;
+    x = set_typ;
+    xs = list(op = op_no_caret; prefix = prefix_typ_op; y = set_typ { Infix_parser.Operator op :: prefix @ [Infix_parser.Primary y] })
+    { simp_infix_typ (mk_typ (ATyp_infix (prefix @ (Infix_parser.Primary x :: List.concat xs)))
+                             (match prefix with [] -> $startpos(x) | _ -> $startpos)
+                             $endpos) }
+
 typ:
-  | typ0
+  | prefix = prefix_typ_op;
+    x = set_typ;
+    xs = list(op = op; prefix = prefix_typ_op; y = set_typ { Infix_parser.Operator op :: prefix @ [Infix_parser.Primary y] })
+    { simp_infix_typ (mk_typ (ATyp_infix (prefix @ (Infix_parser.Primary x :: List.concat xs)))
+                             (match prefix with [] -> $startpos(x) | _ -> $startpos)
+                             $endpos) }
+
+set_typ:
+  | atomic_typ
     { $1 }
-
-/* The following implements all nine levels of user-defined precedence for
-operators in types, with both left, right and non-associative operators */
-
-typ0:
-  | typ1 op0 typ1 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ0l op0l typ1 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1 op0r typ0r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1 { $1 }
-typ0l:
-  | typ1 op0 typ1 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ0l op0l typ1 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1 { $1 }
-typ0r:
-  | typ1 op0 typ1 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1 op0r typ0r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1 { $1 }
-
-typ1:
-  | typ2 op1 typ2 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1l op1l typ2 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2 op1r typ1r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2 { $1 }
-typ1l:
-  | typ2 op1 typ2 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ1l op1l typ2 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2 { $1 }
-typ1r:
-  | typ2 op1 typ2 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2 op1r typ1r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2 { $1 }
-
-typ2:
-  | typ3 op2 typ3 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2l op2l typ3 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3 op2r typ2r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3 Bar typ2r { mk_typ (ATyp_app (deinfix (mk_id (Id "|") $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ3 { $1 }
-typ2l:
-  | typ3 op2 typ3 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ2l op2l typ3 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3 { $1 }
-typ2r:
-  | typ3 op2 typ3 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3 op2r typ2r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3 Bar typ2r { mk_typ (ATyp_app (deinfix (mk_id (Id "|") $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ3 { $1 }
-
-typ3:
-  | typ4 op3 typ4 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3l op3l typ4 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4 op3r typ3r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4 Amp typ3r { mk_typ (ATyp_app (deinfix (mk_id (Id "&") $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ4 { $1 }
-typ3l:
-  | typ4 op3 typ4 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ3l op3l typ4 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4 { $1 }
-typ3r:
-  | typ4 op3 typ4 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4 op3r typ3r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4 Amp typ3r { mk_typ (ATyp_app (deinfix (mk_id (Id "&") $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ4 { $1 }
-
-typ4:
-  | typ5 op4 typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4l op4l typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5 op4r typ4r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | lchain { desugar_lchain $1 $startpos $endpos }
-  | rchain { desugar_rchain $1 $startpos $endpos }
-  | typ5 EqEq typ5 { mk_typ (ATyp_app (deinfix (mk_id (Id $2) $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ5 ExclEq typ5 { mk_typ (ATyp_app (deinfix (mk_id (Id $2) $startpos($2) $endpos($2)), [$1; $3])) $startpos $endpos }
-  | typ5 { $1 }
-typ4l:
-  | typ5 op4 typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ4l op4l typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5 { $1 }
-typ4r:
-  | typ5 op4 typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5 op4r typ4r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5 { $1 }
-
-typ5:
-  | typ6 op5 typ6 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5l op5l typ6 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6 op5r typ5r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6 { $1 }
-typ5l:
-  | typ6 op5 typ6 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ5l op5l typ6 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6 { $1 }
-typ5r:
-  | typ6 op5 typ6 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6 op5r typ5 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6 { $1 }
-
-typ6:
-  | typ7 op6 typ7 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6l op6l typ7 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7 op6r typ6r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6l Plus typ7 { mk_typ (ATyp_sum ($1, $3)) $startpos $endpos }
-  | typ6l Minus typ7 { mk_typ (ATyp_minus ($1, $3)) $startpos $endpos }
-  | typ7 { $1 }
-typ6l:
-  | typ7 op6 typ7 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6l op6l typ7 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ6l Plus typ7 { mk_typ (ATyp_sum ($1, $3)) $startpos $endpos }
-  | typ6l Minus typ7 { mk_typ (ATyp_minus ($1, $3)) $startpos $endpos }
-  | typ7 { $1 }
-typ6r:
-  | typ7 op6 typ7 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7 op6r typ6r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7 { $1 }
-
-typ7:
-  | typ8 op7 typ8 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7l op7l typ8 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ8 op7r typ7r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7l Star typ8 { mk_typ (ATyp_times ($1, $3)) $startpos $endpos }
-  | typ8 { $1 }
-typ7l:
-  | typ8 op7 typ8 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7l op7l typ8 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ7l Star typ8 { mk_typ (ATyp_times ($1, $3)) $startpos $endpos }
-  | typ8 { $1 }
-typ7r:
-  | typ8 op7 typ8 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ8 op7r typ7r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ8 { $1 }
-
-typ8:
-  | typ9 op8 typ9 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ8l op8l typ9 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ9 op8r typ8r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | TwoCaret typ9 { mk_typ (ATyp_exp $2) $startpos $endpos }
-  | Minus typ9 { mk_typ (ATyp_neg $2) $startpos $endpos}
-  | typ9 { $1 }
-typ8l:
-  | typ9 op8 typ9 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ8l op8l typ9 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | TwoCaret typ9 { mk_typ (ATyp_exp $2) $startpos $endpos }
-  | Minus typ9 { mk_typ (ATyp_neg $2) $startpos $endpos}
-  | typ9 { $1 }
-typ8r:
-  | typ9 op8 typ9 { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ9 op8r typ8r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | TwoCaret typ9 { mk_typ (ATyp_exp $2) $startpos $endpos }
-  | Minus typ9 { mk_typ (ATyp_neg $2) $startpos $endpos}
-  | typ9 { $1 }
-
-typ9:
   | kid In Lcurly num_list Rcurly
     { mk_typ (ATyp_nset ($1, $4)) $startpos $endpos }
-  | atomic_typ op9 atomic_typ { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ9l op9l atomic_typ { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | atomic_typ op9r typ9r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | atomic_typ { $1 }
-typ9l:
-  | atomic_typ op9 atomic_typ { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | typ9l op9l atomic_typ { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | atomic_typ { $1 }
-typ9r:
-  | atomic_typ op9 atomic_typ { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | atomic_typ op9r typ9r { mk_typ (ATyp_app (deinfix $2, [$1; $3])) $startpos $endpos }
-  | atomic_typ { $1 }
 
 atomic_typ:
   | id
@@ -733,27 +531,28 @@ typschm_eof:
   | typschm Eof
     { $1 }
 
-pat_string_append:
-  | atomic_pat
-    { [$1] }
-  | atomic_pat Caret pat_string_append
-    { $1 :: $3 }
-
 pat1:
-  | atomic_pat
-    { $1 }
-  | atomic_pat At pat_concat
-    { mk_pat (P_vector_concat ($1 :: $3)) $startpos $endpos }
-  | atomic_pat ColonColon pat1
-    { mk_pat (P_cons ($1, $3)) $startpos $endpos }
-  | atomic_pat Caret pat_string_append
-    { mk_pat (P_string_append ($1 :: $3)) $startpos $endpos }
-
-pat_concat:
-  | atomic_pat
-    { [$1] }
-  | atomic_pat At pat_concat
-    { $1 :: $3 }
+  | p = atomic_pat; ps = list(op = pat_op; q = atomic_pat { (op, q) })
+    { match ps with
+      | [] -> p
+      | (op, _) :: rest ->
+         same_pat_ops op rest;
+         match string_of_id op with
+         | "@" ->
+            mk_pat (P_vector_concat (p :: List.map snd ps)) $startpos $endpos
+         | "::" ->
+            let rec cons_list = function
+              | [(_, x)] -> x
+              | ((_, x) :: xs) -> mk_pat (P_cons (x, cons_list xs)) (first_pat_range $startpos x) $endpos
+              | _ -> assert false in
+            mk_pat (P_cons (p, cons_list ps)) $startpos $endpos
+         | "^" ->
+            mk_pat (P_string_append (p :: List.map snd ps)) $startpos $endpos
+         | _ ->
+            raise (Reporting.err_syntax_loc
+                     (loc $startpos $endpos)
+                     ("Unrecognised operator " ^ string_of_id op ^ " in pattern."))
+    }
 
 pat:
   | pat1
@@ -783,7 +582,7 @@ atomic_pat:
     { mk_pat (P_app ($1, [mk_pat (P_lit (mk_lit L_unit $startpos $endpos)) $startpos $endpos])) $startpos $endpos }
   | id Lparen pat_list Rparen
     { mk_pat (P_app ($1, $3)) $startpos $endpos }
-  | atomic_pat Colon typ
+  | atomic_pat Colon typ_no_caret
     { mk_pat (P_typ ($3, $1)) $startpos $endpos }
   | Lparen pat Rparen
     { $2 }
@@ -834,14 +633,16 @@ internal_loop_measure:
 exp:
   | exp0
     { $1 }
-  | atomic_exp Eq exp
-    { mk_exp (E_assign ($1, $3)) $startpos $endpos }
+  | prefix = prefix_op; lhs = atomic_exp; Eq; rhs = exp
+    { let start = match prefix with [] -> $startpos(lhs) | _ -> $startpos in
+      let lhs = simp_infix (mk_exp (E_infix (prefix @ [Infix_parser.Primary lhs]))
+                                   start
+                                   $endpos(lhs)) in
+      mk_exp (E_assign (lhs, rhs)) start $endpos }
   | Let_ letbind In exp
     { mk_exp (E_let ($2, $4)) $startpos $endpos }
   | Var atomic_exp Eq exp In exp
     { mk_exp (E_var ($2, $4, $6)) $startpos $endpos }
-  | Star atomic_exp
-    { mk_exp (E_deref $2) $startpos $endpos }
   | Lcurly block Rcurly
     { mk_exp (E_block $2) $startpos $endpos }
   | Return exp
@@ -896,173 +697,21 @@ exp:
   | InternalReturn exp
     { mk_exp (E_internal_return($2)) $startpos $endpos }
 
-/* The following implements all nine levels of user-defined precedence for
-operators in expressions, with both left, right and non-associative operators */
+%inline prefix_op:
+  |
+    { [] }
+  | Minus
+    { [Infix_parser.Prefix (mk_id (Id "negate") $startpos $endpos)] }
+  | Star
+    { [Infix_parser.Prefix (mk_id (Id "__deref") $startpos $endpos)] }
 
 exp0:
-  | exp1 op0 exp1 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp0l op0l exp1 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1 op0r exp0r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1 { $1 }
-exp0l:
-  | exp1 op0 exp1 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp0l op0l exp1 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1 { $1 }
-exp0r:
-  | exp1 op0 exp1 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1 op0r exp0r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1 { $1 }
-
-exp1:
-  | exp2 op1 exp2 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1l op1l exp2 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2 op1r exp1r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2 { $1 }
-exp1l:
-  | exp2 op1 exp2 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp1l op1l exp2 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2 { $1 }
-exp1r:
-  | exp2 op1 exp2 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2 op1r exp1r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2 { $1 }
-
-exp2:
-  | exp3 op2 exp3 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2l op2l exp3 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3 op2r exp2r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3 Bar exp2r { mk_exp (E_app_infix ($1, mk_id (Id "|") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp3 { $1 }
-exp2l:
-  | exp3 op2 exp3 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp2l op2l exp3 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3 { $1 }
-exp2r:
-  | exp3 op2 exp3 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3 op2r exp2r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3 Bar exp2r { mk_exp (E_app_infix ($1, mk_id (Id "|") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp3 { $1 }
-
-exp3:
-  | exp4 op3 exp4 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3l op3l exp4 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4 op3r exp3r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4 Amp exp3r { mk_exp (E_app_infix ($1, mk_id (Id "&") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp4 { $1 }
-exp3l:
-  | exp4 op3 exp4 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp3l op3l exp4 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4 { $1 }
-exp3r:
-  | exp4 op3 exp4 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4 op3r exp3r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4 Amp exp3r { mk_exp (E_app_infix ($1, mk_id (Id "&") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp4 { $1 }
-
-exp4:
-  | exp5 op4 exp5 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 Lt exp5 { mk_exp (E_app_infix ($1, mk_id (Id "<") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp5 Gt exp5 { mk_exp (E_app_infix ($1, mk_id (Id ">") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp5 LtEq exp5 { mk_exp (E_app_infix ($1, mk_id (Id "<=") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp5 GtEq exp5 { mk_exp (E_app_infix ($1, mk_id (Id ">=") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp5 ExclEq exp5 { mk_exp (E_app_infix ($1, mk_id (Id "!=") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp5 EqEq exp5 { mk_exp (E_app_infix ($1, mk_id (Id "==") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp4l op4l exp5 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 op4r exp4r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 { $1 }
-exp4l:
-  | exp5 op4 exp5 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp4l op4l exp5 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 { $1 }
-exp4r:
-  | exp5 op4 exp5 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 op4r exp4r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5 { $1 }
-
-exp5:
-  | exp6 op5 exp6 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5l op5l exp6 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6 op5r exp5r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6 At exp5r { mk_exp (E_vector_append ($1, $3)) $startpos $endpos }
-  | exp6 ColonColon exp5r { mk_exp (E_cons ($1, $3)) $startpos $endpos }
-  | exp6 { $1 }
-exp5l:
-  | exp6 op5 exp6 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp5l op5l exp6 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6 { $1 }
-exp5r:
-  | exp6 op5 exp6 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6 op5r exp5r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6 At exp5r { mk_exp (E_vector_append ($1, $3)) $startpos $endpos }
-  | exp6 ColonColon exp5r { mk_exp (E_cons ($1, $3)) $startpos $endpos }
-  | exp6 { $1 }
-
-exp6:
-  | exp7 op6 exp7 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6l op6l exp7 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7 op6r exp6r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6l Plus exp7 { mk_exp (E_app_infix ($1, mk_id (Id "+") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp6l Minus exp7 { mk_exp (E_app_infix ($1, mk_id (Id "-") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp7 { $1 }
-exp6l:
-  | exp7 op6 exp7 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6l op6l exp7 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp6l Plus exp7 { mk_exp (E_app_infix ($1, mk_id (Id "+") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp6l Minus exp7 { mk_exp (E_app_infix ($1, mk_id (Id "-") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp7 { $1 }
-exp6r:
-  | exp7 op6 exp7 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7 op6r exp6r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7 { $1 }
-
-exp7:
-  | exp8 op7 exp8 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7l op7l exp8 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp8 op7r exp7r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7l Star exp8 { mk_exp (E_app_infix ($1, mk_id (Id "*") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp8 { $1 }
-exp7l:
-  | exp8 op7 exp8 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7l op7l exp8 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp7l Star exp8 { mk_exp (E_app_infix ($1, mk_id (Id "*") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | exp8 { $1 }
-exp7r:
-  | exp8 op7 exp8 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp8 op7r exp7r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp8 { $1 }
-
-exp8:
-  | exp9 op8 exp9 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp8l op8l exp9 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9 op8r exp8r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9 Caret exp8r { mk_exp (E_app_infix ($1, mk_id (Id "^") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | TwoCaret exp9 { mk_exp (E_app (mk_id (Id "pow2") $startpos($1) $endpos($1), [$2])) $startpos $endpos }
-  | exp9 { $1 }
-exp8l:
-  | exp9 op8 exp9 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp8l op8l exp9 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | TwoCaret exp9 { mk_exp (E_app (mk_id (Id "pow2") $startpos($1) $endpos($1), [$2])) $startpos $endpos }
-  | exp9 { $1 }
-exp8r:
-  | exp9 op8 exp9 { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9 op8r exp8r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9 Caret exp8r { mk_exp (E_app_infix ($1, mk_id (Id "^") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | TwoCaret exp9 { mk_exp (E_app (mk_id (Id "pow2") $startpos($1) $endpos($1), [$2])) $startpos $endpos }
-  | exp9 { $1 }
-
-exp9:
-  | atomic_exp op9 atomic_exp { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9l op9l atomic_exp { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | atomic_exp op9r exp9r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | atomic_exp { $1 }
-exp9l:
-  | atomic_exp op9 atomic_exp { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | exp9l op9l atomic_exp { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | atomic_exp { $1 }
-exp9r:
-  | atomic_exp op9 atomic_exp { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | atomic_exp op9r exp9r { mk_exp (E_app_infix ($1, $2, $3)) $startpos $endpos }
-  | atomic_exp { $1 }
+  | prefix = prefix_op;
+    x = atomic_exp;
+    xs = list(op = exp_op; prefix = prefix_op; y = atomic_exp { Infix_parser.Operator op :: prefix @ [Infix_parser.Primary y] })
+    { simp_infix (mk_exp (E_infix (prefix @ (Infix_parser.Primary x :: List.concat xs)))
+                         (match prefix with [] -> $startpos(x) | _ -> $startpos)
+                         $endpos) }
 
 case:
   | pat EqGt exp
@@ -1369,29 +1018,30 @@ fun_def_list:
   | fun_def fun_def_list
     { $1 :: $2 }
 
-mpat_string_append:
-  | atomic_mpat
-    { [$1] }
-  | atomic_mpat Caret mpat_string_append
-    { $1 :: $3 }
-
 mpat:
-  | atomic_mpat
-    { $1 }
-  | atomic_mpat As id
-    { mk_mpat (MP_as ($1, $3)) $startpos $endpos }
-  | atomic_mpat At mpat_concat
-    { mk_mpat (MP_vector_concat ($1 :: $3)) $startpos $endpos }
-  | atomic_mpat ColonColon mpat
-    { mk_mpat (MP_cons ($1, $3)) $startpos $endpos }
-  | atomic_mpat Caret mpat_string_append
-    { mk_mpat (MP_string_append ($1 :: $3)) $startpos $endpos }
-
-mpat_concat:
-  | atomic_mpat
-    { [$1] }
-  | atomic_mpat At mpat_concat
-    { $1 :: $3 }
+  | p = atomic_mpat; ps = list(op = pat_op; q = atomic_mpat { (op, q) })
+    { match ps with
+      | [] -> p
+      | (op, _) :: rest ->
+         same_pat_ops op rest;
+         match string_of_id op with
+         | "@" ->
+            mk_mpat (MP_vector_concat (p :: List.map snd ps)) $startpos $endpos
+         | "::" ->
+            let rec cons_list = function
+              | [(_, x)] -> x
+              | ((_, x) :: xs) -> mk_mpat (MP_cons (x, cons_list xs)) (first_mpat_range $startpos x) $endpos
+              | _ -> assert false in
+            mk_mpat (MP_cons (p, cons_list ps)) $startpos $endpos
+         | "^" ->
+            mk_mpat (MP_string_append (p :: List.map snd ps)) $startpos $endpos
+         | _ ->
+            raise (Reporting.err_syntax_loc
+                     (loc $startpos $endpos)
+                     ("Unrecognised operator " ^ string_of_id op ^ " in mapping pattern."))
+    }
+  | p = atomic_mpat; As; id = id
+    { mk_mpat (MP_as (p, id)) $startpos $endpos }
 
 mpat_list:
   | mpat
@@ -1418,7 +1068,7 @@ atomic_mpat:
     { mk_mpat (MP_list []) $startpos $endpos }
   | LsquareBar mpat_list RsquareBar
     { mk_mpat (MP_list $2) $startpos $endpos }
-  | atomic_mpat Colon typ
+  | atomic_mpat Colon typ_no_caret
     { mk_mpat (MP_typ ($1, $3)) $startpos $endpos }
 
 %inline mpexp:
