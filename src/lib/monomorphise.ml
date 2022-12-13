@@ -1694,10 +1694,6 @@ let string_of_argsplits s =
       string_of_id id ^ "." ^ string_of_loc l ^ string_of_match_detail detail)
                         (ArgSplits.bindings s))
 
-let string_of_lx lx =
-  let open Lexing in
-  Printf.sprintf "%s,%d,%d,%d" lx.pos_fname lx.pos_lnum lx.pos_bol lx.pos_cnum
-
 let string_of_extra_splits s =
   String.concat ", "
     (List.map (fun ((id,l),ks) ->

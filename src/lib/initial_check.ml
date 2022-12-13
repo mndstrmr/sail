@@ -563,7 +563,6 @@ let rec to_ast_pat ctx (P.P_aux (pat, l)) =
 
 type partial_lexp =
   | Lexp of unit lexp
-  | Exp of unit exp
   | Raw of P.exp
 
 let rec to_ast_letbind ctx (P.LB_aux(lb,l) : P.letbind) : unit letbind =
@@ -700,19 +699,15 @@ and to_ast_measure ctx (P.Measure_aux(m,l)) : unit internal_loop_measure =
    
 and pl_to_exp ctx = function
   | Raw (P.E_aux (_, l) as exp) -> to_ast_exp ctx exp
-  | Exp exp -> exp
   | Lexp (LEXP_aux (_, (l, _))) ->
      raise (Reporting.err_typ l "Expected expression, found assignment")
 
 and pl_to_lexp ctx = function
   | Raw (P.E_aux (_, l) as exp) -> to_ast_lexp ctx exp
   | Lexp lexp -> lexp
-  | Exp (E_aux (_, (l, _))) ->
-     raise (Reporting.err_typ l "Expected assignment, found expression")
 
 and pl_get_loc = function
   | Raw (P.E_aux (_, l)) -> l
-  | Exp (E_aux (_, (l, _))) -> l
   | Lexp (LEXP_aux (_, (l, _))) -> l
 
 and binary_lexp ctx op e1 e2 =

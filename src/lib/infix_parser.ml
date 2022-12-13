@@ -78,10 +78,6 @@ let map_infix_token_id f = function
   | Operator op -> Operator (f op)
   | Chain ops -> Chain (List.map f ops)
   | Prefix p -> Prefix (f p)
-
-let is_unary = function
-  | Prefix _ -> true
-  | _ -> false
               
 module type Config =
   sig
