@@ -595,11 +595,9 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
   E_aux(
     (match exp with
     | P.E_block exps ->
-      (match to_ast_fexps false ctx exps with
-      | Some fexps -> E_record fexps
-      | None -> E_block (List.map (to_ast_exp ctx) exps))
+       E_block (List.map (to_ast_exp ctx) exps)
     | P.E_id id ->
-       (* We support identifiers the same as __LOC__, __FILE__ and
+        (* We support identifiers the same as __LOC__, __FILE__ and
           __LINE__ in the OCaml standard library, and similar
           constructs in C *)
        let id_str = string_of_parse_id id in
@@ -635,8 +633,6 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
          ~chain:(fun _ _ -> raise (Reporting.err_general l "Chained comparisons only allowed in types"))
          rpn
        |> (fun (E_aux (aux, _)) -> aux)
-    | P.E_app_infix(left,op,right) ->
-       E_app_infix(to_ast_exp ctx left, to_ast_id ctx op, to_ast_exp ctx right)
     | P.E_tuple(exps) -> E_tuple(List.map (to_ast_exp ctx) exps)
     | P.E_if(e1,e2,e3) -> E_if(to_ast_exp ctx e1, to_ast_exp ctx e2, to_ast_exp ctx e3)
     | P.E_for(id,e1,e2,e3,atyp,e4) ->
@@ -655,14 +651,8 @@ and to_ast_exp ctx (P.E_aux(exp,l) : P.exp) =
 			       to_ast_exp ctx e2, to_ast_exp ctx e3)
     | P.E_list(exps) -> E_list(List.map (to_ast_exp ctx) exps)
     | P.E_cons(e1,e2) -> E_cons(to_ast_exp ctx e1, to_ast_exp ctx e2)
-    | P.E_record fexps ->
-       (match to_ast_fexps true ctx fexps with
-        | Some fexps -> E_record fexps
-        | None -> raise (Reporting.err_unreachable l __POS__ "to_ast_fexps with true returned none"))
-    | P.E_record_update(exp,fexps) ->
-      (match to_ast_fexps true ctx fexps with
-      | Some(fexps) -> E_record_update(to_ast_exp ctx exp, fexps)
-      | _ -> raise (Reporting.err_unreachable l __POS__ "to_ast_fexps with true returned none"))
+    | P.E_record fexps -> E_record (to_ast_fexps ctx fexps)
+    | P.E_record_update(exp,fexps) -> E_record_update(to_ast_exp ctx exp, to_ast_fexps ctx fexps)
     | P.E_field(exp,id) -> E_field(to_ast_exp ctx exp, to_ast_id ctx id)
     | P.E_case(exp,pexps) -> E_case(to_ast_exp ctx exp, List.map (to_ast_case ctx) pexps)
     | P.E_try (exp, pexps) -> E_try (to_ast_exp ctx exp, List.map (to_ast_case ctx) pexps)
@@ -782,35 +772,11 @@ and to_ast_case ctx (P.Pat_aux(pex,l) : P.pexp) : unit pexp =
   | P.Pat_when(pat,guard,exp) ->
      Pat_aux (Pat_when (to_ast_pat ctx pat, to_ast_exp ctx guard, to_ast_exp ctx exp), (l, ()))
 
-and to_ast_fexps (fail_on_error:bool) ctx (exps : P.exp list) : unit fexp list option =
-  match exps with
-  | [] -> Some []
-  | fexp::exps -> let maybe_fexp,maybe_error = to_ast_record_try ctx fexp in
-                  (match maybe_fexp,maybe_error with
-                  | Some(fexp),None ->
-                    (match (to_ast_fexps fail_on_error ctx exps) with
-                    | Some(fexps) -> Some(fexp::fexps)
-                    | _  -> None)
-                  | None,Some(l,msg) ->
-                    if fail_on_error
-                    then raise (Reporting.err_typ l msg)
-                    else None
-                  | _ -> None)
-
-and to_ast_record_try ctx (P.E_aux(exp,l):P.exp): unit fexp option * (l * string) option =
-  match exp with
-  | P.E_app_infix(left,op,r) ->
-    (match left, op with
-    | P.E_aux(P.E_id(id),li), P.Id_aux(P.Id("="),leq) ->
-      Some(FE_aux(FE_Fexp(to_ast_id ctx id, to_ast_exp ctx r), (l,()))),None
-    | P.E_aux(_,li) , P.Id_aux(P.Id("="),leq) ->
-      None,Some(li,"Expected an identifier to begin this field assignment")
-    | P.E_aux(P.E_id(id),li), P.Id_aux(_,leq) ->
-      None,Some(leq,"Expected a field assignment to be identifier = expression")
-    | P.E_aux(_,li),P.Id_aux(_,leq) ->
-      None,Some(l,"Expected a field assignment to be identifier = expression"))
-  | _ ->
-     None,Some(l, "Expected a field assignment to be identifier = expression")
+and to_ast_fexps ctx fexps =
+  match fexps with
+  | [] -> []
+  | P.FE_aux (P.FE_Fexp (id, exp), l) :: fexps ->
+     FE_aux (FE_Fexp (to_ast_id ctx id, to_ast_exp ctx exp), (l, ())) :: to_ast_fexps ctx fexps
 
 type 'a ctx_out = 'a * ctx
 
@@ -825,7 +791,7 @@ let to_ast_default ctx (default : P.default_typing_spec) : default_spec ctx_out 
      | K_aux(K_order, _), P.ATyp_aux(P.ATyp_dec,lo) ->
         let default_order = Ord_aux(Ord_dec,lo) in
         DT_aux(DT_order default_order,l),ctx
-     | _ -> raise (Reporting.err_typ l "Inc and Dec must have kind Order")
+     | _ -> raise (Reporting.err_typ l ("default declaration must be for kind Order, found " ^ string_of_kind k))
 
 let to_ast_extern (ext : P.extern) : extern =
   { pure = ext.pure; bindings = ext.bindings }
@@ -1091,14 +1057,12 @@ let to_ast_mapdef ctx (P.MD_aux(md,l):P.mapdef) : unit mapdef =
 
 let to_ast_dec ctx (P.DEC_aux(regdec,l)) =
   DEC_aux((match regdec with
-           | P.DEC_reg (reffect, weffect, typ, id, opt_exp) ->
+           | P.DEC_reg (typ, id, opt_exp) ->
               let opt_exp = match opt_exp with
                 | None -> None
                 | Some exp -> Some (to_ast_exp ctx exp)
               in
               DEC_reg (to_ast_typ ctx typ, to_ast_id ctx id, opt_exp)
-           | P.DEC_config (id, typ, exp) ->
-              DEC_reg (to_ast_typ ctx typ, to_ast_id ctx id, Some (to_ast_exp ctx exp))
           ),(l,()))
 
 let to_ast_scattered ctx (P.SD_aux (aux, l)) =

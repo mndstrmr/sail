@@ -1,0 +1,5 @@
+[93mType error[0m:
+[96mbad_default.sail[0m:1.0-16:
+1[96m |[0mdefault Type dec
+ [91m |[0m[91m^--------------^[0m
+ [91m |[0m default declaration must be for kind Order, found Type

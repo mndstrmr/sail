@@ -101,43 +101,18 @@ type
 kind =
    K_aux of kind_aux * l
 
-
-type 
-base_effect_aux =  (* effect *)
-   BE_rreg (* read register *)
- | BE_wreg (* write register *)
- | BE_rmem (* read memory *)
- | BE_wmem (* write memory *)
- | BE_wmv (* write memory value *)
- | BE_eamem (* address for write signaled *)
- | BE_exmem (* determine if a store-exclusive (ARM) is going to succeed *)
- | BE_barr (* memory barrier *)
- | BE_depend (* dynmically dependent footprint *)
- | BE_undef (* undefined-instruction exception *)
- | BE_unspec (* unspecified values *)
- | BE_nondet (* nondeterminism from intra-instruction parallelism *)
- | BE_escape
- | BE_config
-
 type 
 kid_aux =  (* identifiers with kind, ticked to differntiate from program variables *)
    Var of x
-
 
 type 
 id_aux =  (* Identifier *)
    Id of x
  | Operator of x (* remove infix status *)
 
-type
-base_effect = 
-   BE_aux of base_effect_aux * l
-
-
 type 
 kid = 
    Kid_aux of kid_aux * l
-
 
 type 
 id = 
@@ -172,7 +147,7 @@ atyp_aux =  (* expressions of all kinds, to be translated to types, nats, orders
  | ATyp_inc (* increasing *)
  | ATyp_dec (* decreasing *)
  | ATyp_default_ord (* default order for increasing or decreasing signficant bits *)
- | ATyp_set of (base_effect) list (* effect set *)
+ | ATyp_set of id list (* effect set *)
  | ATyp_fn of atyp * atyp * atyp (* Function type, last atyp is an effect *)
  | ATyp_bidir of atyp * atyp * atyp (* Mapping type, last atyp is an effect *)
  | ATyp_wild
@@ -261,29 +236,28 @@ and measure =
  
 and
 exp_aux =  (* Expression *)
-   E_block of (exp) list (* block (parsing conflict with structs?) *)
+   E_block of (exp) list (* block *)
  | E_id of id (* identifier *)
  | E_ref of id
  | E_lit of lit (* literal constant *)
  | E_cast of atyp * exp (* cast *)
- | E_app of id * (exp) list (* function application *)
- | E_app_infix of exp * id * exp (* infix function application *)
+ | E_app of id * exp list (* function application *)
  | E_infix of (exp, id) Infix_parser.infix_token list
- | E_tuple of (exp) list (* tuple *)
+ | E_tuple of exp list (* tuple *)
  | E_if of exp * exp * exp (* conditional *)
  | E_loop of loop * measure * exp * exp
  | E_for of id * exp * exp * exp * atyp * exp (* loop *)
- | E_vector of (exp) list (* vector (indexed from 0) *)
+ | E_vector of exp list (* vector (indexed from 0) *)
  | E_vector_access of exp * exp (* vector access *)
  | E_vector_subrange of exp * exp * exp (* subvector extraction *)
  | E_vector_update of exp * exp * exp (* vector functional update *)
  | E_vector_update_subrange of exp * exp * exp * exp (* vector subrange update (with vector) *)
- | E_list of (exp) list (* list *)
+ | E_list of exp list (* list *)
  | E_cons of exp * exp (* cons *)
- | E_record of exp list (* struct *)
- | E_record_update of exp * (exp) list (* functional update of struct *)
+ | E_record of fexp list (* struct *)
+ | E_record_update of exp * fexp list (* functional update of struct *)
  | E_field of exp * id (* field projection from struct *)
- | E_case of exp * (pexp) list (* pattern matching *)
+ | E_case of exp * pexp list (* pattern matching *)
  | E_let of letbind * exp (* let expression *)
  | E_assign of exp * exp (* imperative assignment *)
  | E_sizeof of atyp
@@ -469,8 +443,7 @@ val_spec_aux =  (* Value type specification *)
 
 type 
 dec_spec_aux =  (* Register declarations *)
-   DEC_reg of atyp * atyp * atyp * id * exp option
- | DEC_config of id * atyp * exp
+   DEC_reg of atyp * id * exp option
 
 type 
 scattered_def_aux =  (* Function and type union definitions that can be spread across

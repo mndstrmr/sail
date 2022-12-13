@@ -1,0 +1,8 @@
+[93mError[0m:
+[96mmismatched_infix.sail[0m:2.0-11:
+2[96m |[0minfixr 7 <<
+ [92m |[0m[92m^---------^[0m [92mpreviously declared here[0m
+[96mmismatched_infix.sail[0m:4.0-11:
+4[96m |[0minfixl 7 <<
+ [91m |[0m[91m^---------^[0m
+ [91m |[0m Mismatched infix declaration for <<, previously right-associative at level 7, now left-associative at level 7

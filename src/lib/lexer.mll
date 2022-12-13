@@ -142,23 +142,8 @@ let kw_table =
      ("while",                   (fun _ -> While));
      ("do",                      (fun _ -> Do));
      ("mutual",                  (fun _ -> Mutual));
-     ("bitfield",                (fun _ -> Bitfield));
-     ("barr",                    (fun _ -> Barr));
-     ("depend",                  (fun _ -> Depend));
-     ("rreg",                    (fun _ -> Rreg));
-     ("wreg",                    (fun _ -> Wreg));
-     ("rmem",                    (fun _ -> Rmem));
-     ("rmemt",                   (fun _ -> Rmem));
-     ("wmem",                    (fun _ -> Wmem));
-     ("wmv",                     (fun _ -> Wmv));
-     ("wmvt",                    (fun _ -> Wmv));
-     ("eamem",                   (fun _ -> Eamem));
-     ("exmem",                   (fun _ -> Exmem));
-     ("undef",                   (fun _ -> Undef));
-     ("unspec",                  (fun _ -> Unspec));
-     ("nondet",                  (fun _ -> Nondet));
-     ("escape",                  (fun _ -> Escape));
      ("configuration",           (fun _ -> Configuration));
+     ("bitfield",                (fun _ -> Bitfield));
      ("termination_measure",     (fun _ -> TerminationMeasure));
      ("forwards",                (fun _ -> Forwards));
      ("backwards",               (fun _ -> Backwards));
@@ -206,11 +191,11 @@ rule token = parse
   | "^"                                 { Caret }
   | "*"                                 { Star }
   | "::"                                { ColonColon }
-  | ":"                                 { Colon ":" }
+  | ":"                                 { Colon }
   | ","                                 { Comma }
   | ".."                                { DotDot }
   | "."                                 { Dot }
-  | "="                                 { Eq "=" }
+  | "="                                 { Eq }
   | "-"					{ Minus }
   | ";"                                 { Semi }
   | "_"                                 { Under }
@@ -221,14 +206,14 @@ rule token = parse
   | "|"                                 { Bar }
   | "{"                                 { Lcurly }
   | "}"                                 { Rcurly }
-  | "()"                                { Unit "()" }
+  | "()"                                { Unit }
   | "("                                 { Lparen }
   | ")"                                 { Rparen }
   | "["                                 { Lsquare }
   | "]"                                 { Rsquare }
   | "->"                                { MinusGt }
   | "<->"                               { Bidir }
-  | "=>"                                { EqGt "=>" }
+  | "=>"                                { EqGt }
   | "/*!" wsc*  { Doc (doc_comment (Lexing.lexeme_start_p lexbuf) (Buffer.create 10) 0 false lexbuf) }
   | "//"        { line_comment (Lexing.lexeme_start_p lexbuf) (Buffer.create 10) lexbuf; token lexbuf }
   | "/*"        { comment (Lexing.lexeme_start_p lexbuf) (Buffer.create 10) 0 lexbuf; token lexbuf }
@@ -268,9 +253,9 @@ and pragma pos b after_block = parse
   | (wsc as c)                          { Buffer.add_string b (String.make 1 c); pragma pos b after_block lexbuf }
   | "//"                                { line_comment (Lexing.lexeme_start_p lexbuf) (Buffer.create 10) lexbuf; unescaped (Buffer.contents b) }
   | "/*"                                { comment (Lexing.lexeme_start_p lexbuf) (Buffer.create 10) 0 lexbuf; pragma pos b true lexbuf }
-  | _ as c                              { if after_block then
+  | _ as c                              { if after_block then (
                                             raise (Reporting.err_lex (Lexing.lexeme_start_p lexbuf) "Directive continued after block comment")
-                                          else (
+                                          ) else (
                                             Buffer.add_string b (String.make 1 c);
                                             pragma pos b after_block lexbuf
                                           ) }

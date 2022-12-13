@@ -120,8 +120,6 @@ let rec same_pat_ops (Id_aux (_, l) as op) = function
                                 (string_of_id op')))
   | [] -> ()
     
-         
-let mk_effect e n m = BE_aux (e, loc n m)
 let mk_typ t n m = ATyp_aux (t, loc n m)
 let mk_pat p n m = P_aux (p, loc n m)
 let mk_pexp p n m = Pat_aux (p, loc n m)
@@ -234,7 +232,6 @@ let warn_extern_effect l =
 %token Enum Else False Forall Foreach Overload Function_ Mapping If_ In Inc Let_ Int Order Bool Cast
 %token Pure Monadic Register Return Scattered Sizeof Struct Then True TYPE Typedef
 %token Undefined Union Newtype With Val Outcome Constraint Throw Try Catch Exit Bitfield Constant
-%token Barr Depend Rreg Wreg Rmem Wmem Wmv Eamem Exmem Undef Unspec Nondet Escape
 %token Repeat Until While Do Mutual Var Ref Configuration TerminationMeasure Instantiation Impl
 %token InternalPLet InternalReturn
 %token Forwards Backwards
@@ -242,18 +239,15 @@ let warn_extern_effect l =
 %nonassoc Then
 %nonassoc Else
 
-%token Bar Comma Dot Eof Minus Semi Under DotDot At ColonColon Caret
+%token Bar Comma Dot Eof Minus Semi Under DotDot At ColonColon Caret Colon Eq EqGt
 %token Lcurly Rcurly Lparen Rparen Lsquare Rsquare LcurlyBar RcurlyBar LsquareBar RsquareBar
-%token MinusGt Bidir
+%token MinusGt Bidir Unit
 
 /*Terminals with content*/
 
 %token <string> Id TyVar
 %token <Nat_big_num.num> Num
 %token <string> String Bin Hex Real
-
-%token <string> Eq EqGt Unit
-%token <string> Colon
 
 %token <string> Doc
 
@@ -463,41 +457,15 @@ typquant:
   | kopt_list
     { TypQ_aux (TypQ_tq (List.map qi_id_of_kopt $1), loc $startpos $endpos) }
 
-effect:
-  | Barr
-    { mk_effect BE_barr $startpos $endpos }
-  | Depend
-    { mk_effect BE_depend $startpos $endpos }
-  | Rreg
-    { mk_effect BE_rreg $startpos $endpos }
-  | Wreg
-    { mk_effect BE_wreg $startpos $endpos }
-  | Rmem
-    { mk_effect BE_rmem $startpos $endpos }
-  | Wmem
-    { mk_effect BE_wmem $startpos $endpos }
-  | Wmv
-    { mk_effect BE_wmv $startpos $endpos }
-  | Eamem
-    { mk_effect BE_eamem $startpos $endpos }
-  | Exmem
-    { mk_effect BE_exmem $startpos $endpos }
-  | Undef
-    { mk_effect BE_undef $startpos $endpos }
-  | Unspec
-    { mk_effect BE_unspec $startpos $endpos }
-  | Nondet
-    { mk_effect BE_nondet $startpos $endpos }
-  | Escape
-    { mk_effect BE_escape $startpos $endpos }
-  | Configuration
-    { mk_effect BE_config $startpos $endpos }
-
 effect_list:
-  | effect
+  | id
     { [$1] }
-  | effect Comma effect_list
-    { $1::$3 }
+  | Configuration
+    { [mk_id (Id "configuration") $startpos $endpos] }
+  | id Comma effect_list
+    { $1 :: $3 }
+  | Configuration Comma effect_list
+    { mk_id (Id "configuration") $startpos($1) $endpos($1) :: $3 }
 
 effect_set:
   | Lcurly effect_list Rcurly
@@ -808,10 +776,11 @@ atomic_exp:
     { mk_exp (E_tuple ($2 :: $4)) $startpos $endpos }
 
 fexp_exp:
-  | atomic_exp Eq exp
-    { mk_exp (E_app_infix ($1, mk_id (Id "=") $startpos($2) $endpos($2), $3)) $startpos $endpos }
-  | id
-    { mk_exp (E_app_infix (mk_exp (E_id $1) $startpos $endpos, mk_id (Id "=") $startpos $endpos, mk_exp (E_id $1) $startpos $endpos)) $startpos $endpos }
+  | id Eq exp
+    { FE_aux (FE_Fexp ($1, $3), loc $startpos $endpos) }
+  | id = id
+    { let id_exp = mk_exp (E_id id) $startpos $endpos in
+      FE_aux (FE_Fexp (id, id_exp), loc $startpos $endpos) }
 
 fexp_exp_list:
   | fexp_exp
@@ -1161,19 +1130,15 @@ register_def:
   | Doc register_def
     { doc_reg_dec $1 $2 }
   | Register id Colon typ
-    { let rreg = mk_typ (ATyp_set [mk_effect BE_rreg $startpos($1) $endpos($1)]) $startpos($1) $endpos($1) in
-      let wreg = mk_typ (ATyp_set [mk_effect BE_wreg $startpos($1) $endpos($1)]) $startpos($1) $endpos($1) in
-      mk_reg_dec (DEC_reg (rreg, wreg, $4, $2, None)) $startpos $endpos }
+    { mk_reg_dec (DEC_reg ($4, $2, None)) $startpos $endpos }
   | Register id Colon typ Eq exp
-    { let rreg = mk_typ (ATyp_set [mk_effect BE_rreg $startpos($1) $endpos($1)]) $startpos($1) $endpos($1) in
-      let wreg = mk_typ (ATyp_set [mk_effect BE_wreg $startpos($1) $endpos($1)]) $startpos($1) $endpos($1) in
-      mk_reg_dec (DEC_reg (rreg, wreg, $4, $2, Some $6)) $startpos $endpos }
+    { mk_reg_dec (DEC_reg ($4, $2, Some $6)) $startpos $endpos }
   | Register effect_set effect_set id Colon typ
-    { mk_reg_dec (DEC_reg ($2, $3, $6, $4, None)) $startpos $endpos }
+    { mk_reg_dec (DEC_reg ($6, $4, None)) $startpos $endpos }
   | Register effect_set effect_set id Colon typ Eq exp
-    { mk_reg_dec (DEC_reg ($2, $3, $6, $4, Some $8)) $startpos $endpos }
+    { mk_reg_dec (DEC_reg ($6, $4, Some $8)) $startpos $endpos }
   | Register Configuration id Colon typ Eq exp
-    { mk_reg_dec (DEC_config ($3, $5, $7)) $startpos $endpos }
+    { mk_reg_dec (DEC_reg ($5, $3, Some $7)) $startpos $endpos }
 
 default_def:
   | Default kind Inc
